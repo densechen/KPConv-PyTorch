@@ -95,7 +95,7 @@ if __name__ == '__main__':
     #       > 'last_XXX': Automatically retrieve the last trained model on dataset XXX
     #       > '(old_)results/Log_YYYY-MM-DD_HH-MM-SS': Directly provide the path of a trained model
 
-    chosen_log = 'results/Log_2020-04-05_19-19-20'  # => ModelNet40
+    chosen_log = 'results/kitti-planeconv-1'  # => ModelNet40
 
     # Choose the index of the checkpoint to load OR None if you want to load the current checkpoint
     chkp_idx = None
@@ -111,7 +111,7 @@ if __name__ == '__main__':
     ############################
 
     # Set which gpu is going to be used
-    GPU_ID = '0'
+    GPU_ID = '1'
 
     # Set GPU visible device
     os.environ['CUDA_VISIBLE_DEVICES'] = GPU_ID
@@ -209,10 +209,10 @@ if __name__ == '__main__':
 
     # Training
     if config.dataset_task == 'classification':
-        tester.classification_test(net, test_loader, config)
+        tester.classification_test(net, test_loader, config, num_votes=10)
     elif config.dataset_task == 'cloud_segmentation':
         tester.cloud_segmentation_test(net, test_loader, config)
     elif config.dataset_task == 'slam_segmentation':
-        tester.slam_segmentation_test(net, test_loader, config)
+        tester.slam_segmentation_test(net, test_loader, config, num_votes=10)
     else:
         raise ValueError('Unsupported dataset_task for testing: ' + config.dataset_task)

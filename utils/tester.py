@@ -692,8 +692,8 @@ class ModelTester:
             new_min = torch.min(test_loader.dataset.potentials)
             print('Test epoch {:d}, end. Min potential = {:.1f}'.format(test_epoch, new_min))
 
-            if last_min + 1 < new_min:
-
+            # if last_min + 1 < new_min:
+            if True:
                 # Update last_min
                 last_min += 1
 

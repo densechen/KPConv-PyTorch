@@ -62,7 +62,7 @@ class SemanticKittiConfig(Config):
     dataset_task = ''
 
     # Number of CPU threads for the input pipeline
-    input_threads = 10
+    input_threads = 4
 
     #########################
     # Architecture definition
@@ -209,7 +209,7 @@ if __name__ == '__main__':
     ############################
 
     # Set which gpu is going to be used
-    GPU_ID = '0'
+    GPU_ID = '1'
 
     # Set GPU visible device
     os.environ['CUDA_VISIBLE_DEVICES'] = GPU_ID
@@ -220,7 +220,7 @@ if __name__ == '__main__':
 
     # Choose here if you want to start training from a previous snapshot (None for new training)
     # previous_training_path = 'Log_2020-03-19_19-53-27'
-    previous_training_path = ''
+    previous_training_path = 'kitti-planeconv'
 
     # Choose index of checkpoint to start from. If None, uses the latest chkp
     chkp_idx = None

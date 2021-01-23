@@ -279,6 +279,7 @@ if __name__ == '__main__':
     print('**************')
 
     # Training
+    # trainer.train(net, training_loader, test_loader, config)
     try:
         trainer.train(net, training_loader, test_loader, config)
     except:

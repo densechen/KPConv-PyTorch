@@ -135,6 +135,40 @@ def global_average(x, batch_lengths):
 
 # ----------------------------------------------------------------------------------------------------------------------
 #
+#           PlaneConv class
+#       \******************/
+#
+class PlaneConvGlobal(nn.Module):
+    def __init__(self, in_channels, out_channels) -> None:
+        super().__init__()
+        self.offset = Parameter(torch.Tensor(1, out_channels, 1))
+        self.normal = nn.Conv1d(3, out_channels,
+                                1, bias=False)
+
+        self.feat_kernel = nn.Conv1d(
+            in_channels, out_channels, 1, bias=False)
+
+        # !Reset Parameters
+        nn.init.kaiming_normal_(self.offset.data)
+
+    def forward(self, points, features):
+        points = points.T.unsqueeze(0)
+        features = features.T.unsqueeze(0)
+        # [batch_size, dim, numel]
+        with torch.no_grad():
+            self.normal.weight.data = self.normal.weight.data / \
+                (torch.norm(self.normal.weight.data, dim=0, keepdim=True) + 1e-8)
+
+        distance = self.normal(points) + self.offset
+        geometric_relation_matrix = torch.exp(- distance ** 2)
+        feature_relation_matrix = self.feat_kernel(features)
+
+        return (geometric_relation_matrix * feature_relation_matrix).squeeze(0).T
+
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+#
 #           KPConv class
 #       \******************/
 #
@@ -211,6 +245,9 @@ class KPConv(nn.Module):
         # Initialize kernel points
         self.kernel_points = self.init_KP()
 
+        # PlaneConv
+        self.plane_conv = PlaneConvGlobal(self.out_channels, self.out_channels)
+
         return
 
     def reset_parameters(self):
@@ -235,7 +272,6 @@ class KPConv(nn.Module):
                          requires_grad=False)
 
     def forward(self, q_pts, s_pts, neighb_inds, x):
-
         ###################
         # Offset generation
         ###################
@@ -370,7 +406,17 @@ class KPConv(nn.Module):
         kernel_outputs = torch.matmul(weighted_features, self.weights)
 
         # Convolution sum [n_points, out_fdim]
-        return torch.sum(kernel_outputs, dim=0)
+        feature = torch.sum(kernel_outputs, dim=0)
+
+        ###################
+        # Merge plane conv message
+        ###################
+        if hasattr(self, "plane_conv"):
+            plane_feature = self.plane_conv(q_pts, feature)
+
+            return feature + plane_feature
+        else:
+            return feature
 
     def __repr__(self):
         return 'KPConv(radius: {:.2f}, in_feat: {:d}, out_feat: {:d})'.format(self.radius,
