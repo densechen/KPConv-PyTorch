@@ -148,7 +148,7 @@ class PlaneConvGlobal(nn.Module):
     def forward(self, points):
         # [n_points, n_neighbors, dim]
         points = points.detach().clone()
-        
+
         points = points.unsqueeze(dim=0).permute(0, 3, 1, 2)
         # [batch_size, dim, n_points, n_neighbors]
 
@@ -157,13 +157,15 @@ class PlaneConvGlobal(nn.Module):
 
         features = quandratic_conv1x1 + linear_conv1x1
 
-        non_linear_feature = torch.exp(- features ** 2)
+        # non_linear_feature = torch.exp(- features ** 2)
         # [batch_size, out_channels, n_points, n_neighbors]
 
-        max_non_linear_feature = torch.max(non_linear_feature, dim=-1)[0]
+        avg_non_linear_feature = torch.mean(features, dim=-1)
         # [batch_size, out_channels, n_points]
 
-        return max_non_linear_feature.squeeze(0).T  # [n_points, out_channels]
+        avg_non_linear_feature = torch.tanh(avg_non_linear_feature)
+
+        return avg_non_linear_feature.squeeze(0).T  # [n_points, out_channels]
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -213,7 +215,7 @@ class KPConv(nn.Module):
         self.offset_features = None
 
         # Initialize weights
-        self.weights = Parameter(torch.zeros((self.K, in_channels, out_channels), dtype=torch.float32),
+        self.weights = Parameter(torch.zeros((self.K, in_channels, out_channels // 2), dtype=torch.float32),
                                  requires_grad=True)
 
         # Initiate weights for offsets
@@ -246,7 +248,8 @@ class KPConv(nn.Module):
         self.kernel_points = self.init_KP()
 
         # PlaneConv
-        self.plane_conv = PlaneConvGlobal(self.out_channels)
+        self.plane_conv = PlaneConvGlobal(
+            self.out_channels - self.out_channels // 2)
 
         return
 
@@ -436,7 +439,7 @@ class KPConv(nn.Module):
         # Merge plane conv message
         ###################
         if plane_feature is not None:
-            return feature + plane_feature
+            return torch.cat([feature, plane_feature], dim=-1)
         else:
             return feature
 
