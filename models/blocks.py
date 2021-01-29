@@ -139,33 +139,34 @@ def global_average(x, batch_lengths):
 #       \******************/
 #
 class PlaneConvGlobal(nn.Module):
-    def __init__(self, out_channels) -> None:
+    def __init__(self, in_channels, out_channels) -> None:
         super().__init__()
+        self.offset = Parameter(torch.Tensor(1, out_channels, 1))
+        self.linear_conv1x1 = nn.Conv1d(3, out_channels,
+                                1, bias=False)
+        self.quadratic_conv1x1 = nn.Conv1d(3, out_channels,
+                                1, bias=False)
 
-        self.quadratic_conv1x1 = nn.Conv2d(3, out_channels, 1, bias=True)
-        self.linear_conv1x1 = nn.Conv2d(3, out_channels, 1, bias=True)
+        self.feat_kernel = nn.Conv1d(
+            in_channels, out_channels, 1, bias=False)
 
-    def forward(self, points):
-        # [n_points, n_neighbors, dim]
-        points = points.detach().clone()
+        # !Reset Parameters
+        nn.init.kaiming_normal_(self.offset.data)
 
-        points = points.unsqueeze(dim=0).permute(0, 3, 1, 2)
-        # [batch_size, dim, n_points, n_neighbors]
+    def forward(self, points, features):
+        points = points.T.unsqueeze(0)
+        features = features.T.unsqueeze(0)
+        # [batch_size, dim, numel]
+        with torch.no_grad():
+            self.linear_conv1x1.weight.data = self.linear_conv1x1.weight.data / \
+                (torch.norm(self.linear_conv1x1.weight.data, dim=0, keepdim=True) + 1e-8)
 
-        quandratic_conv1x1 = self.quadratic_conv1x1(points ** 2)
-        linear_conv1x1 = self.linear_conv1x1(points)
+        distance = self.linear_conv1x1(points) + self.offset + self.quadratic_conv1x1(points ** 2)
+        geometric_relation_matrix = torch.exp(- distance ** 2)
+        feature_relation_matrix = self.feat_kernel(features)
 
-        features = quandratic_conv1x1 + linear_conv1x1
+        return (geometric_relation_matrix * feature_relation_matrix).squeeze(0).T
 
-        # non_linear_feature = torch.exp(- features ** 2)
-        # [batch_size, out_channels, n_points, n_neighbors]
-
-        avg_non_linear_feature = torch.mean(features, dim=-1)
-        # [batch_size, out_channels, n_points]
-
-        avg_non_linear_feature = torch.tanh(avg_non_linear_feature)
-
-        return avg_non_linear_feature.squeeze(0).T  # [n_points, out_channels]
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -215,7 +216,7 @@ class KPConv(nn.Module):
         self.offset_features = None
 
         # Initialize weights
-        self.weights = Parameter(torch.zeros((self.K, in_channels, out_channels // 2), dtype=torch.float32),
+        self.weights = Parameter(torch.zeros((self.K, in_channels, out_channels), dtype=torch.float32),
                                  requires_grad=True)
 
         # Initiate weights for offsets
@@ -233,8 +234,7 @@ class KPConv(nn.Module):
                                       fixed_kernel_points=fixed_kernel_points,
                                       KP_influence=KP_influence,
                                       aggregation_mode=aggregation_mode)
-            self.offset_bias = Parameter(torch.zeros(
-                self.offset_dim, dtype=torch.float32), requires_grad=True)
+            self.offset_bias = Parameter(torch.zeros(self.offset_dim, dtype=torch.float32), requires_grad=True)
 
         else:
             self.offset_dim = None
@@ -248,8 +248,7 @@ class KPConv(nn.Module):
         self.kernel_points = self.init_KP()
 
         # PlaneConv
-        self.plane_conv = PlaneConvGlobal(
-            self.out_channels - self.out_channels // 2)
+        self.plane_conv = PlaneConvGlobal(self.out_channels, self.out_channels)
 
         return
 
@@ -282,27 +281,21 @@ class KPConv(nn.Module):
         if self.deformable:
 
             # Get offsets with a KPConv that only takes part of the features
-            self.offset_features = self.offset_conv(
-                q_pts, s_pts, neighb_inds, x) + self.offset_bias
+            self.offset_features = self.offset_conv(q_pts, s_pts, neighb_inds, x) + self.offset_bias
 
             if self.modulated:
 
                 # Get offset (in normalized scale) from features
-                unscaled_offsets = self.offset_features[:,
-                                                        :self.p_dim * self.K]
-                unscaled_offsets = unscaled_offsets.view(
-                    -1, self.K, self.p_dim)
+                unscaled_offsets = self.offset_features[:, :self.p_dim * self.K]
+                unscaled_offsets = unscaled_offsets.view(-1, self.K, self.p_dim)
 
                 # Get modulations
-                modulations = 2 * \
-                    torch.sigmoid(
-                        self.offset_features[:, self.p_dim * self.K:])
+                modulations = 2 * torch.sigmoid(self.offset_features[:, self.p_dim * self.K:])
 
             else:
 
                 # Get offset (in normalized scale) from features
-                unscaled_offsets = self.offset_features.view(
-                    -1, self.K, self.p_dim)
+                unscaled_offsets = self.offset_features.view(-1, self.K, self.p_dim)
 
                 # No modulations
                 modulations = None
@@ -327,15 +320,6 @@ class KPConv(nn.Module):
         # Center every neighborhood
         neighbors = neighbors - q_pts.unsqueeze(1)
 
-        ###################
-        # PlaneConv here
-        ###################
-        if hasattr(self, "plane_conv"):
-            # [n_points, out_channels]
-            plane_feature = self.plane_conv(neighbors)
-        else:
-            plane_feature = None
-
         # Apply offsets to kernel points [n_points, n_kpoints, dim]
         if self.deformable:
             self.deformed_KP = offsets + self.kernel_points
@@ -357,30 +341,25 @@ class KPConv(nn.Module):
             self.min_d2, _ = torch.min(sq_distances, dim=1)
 
             # Boolean of the neighbors in range of a kernel point [n_points, n_neighbors]
-            in_range = torch.any(
-                sq_distances < self.KP_extent ** 2, dim=2).type(torch.int32)
+            in_range = torch.any(sq_distances < self.KP_extent ** 2, dim=2).type(torch.int32)
 
             # New value of max neighbors
             new_max_neighb = torch.max(torch.sum(in_range, dim=1))
 
             # For each row of neighbors, indices of the ones that are in range [n_points, new_max_neighb]
-            neighb_row_bool, neighb_row_inds = torch.topk(
-                in_range, new_max_neighb.item(), dim=1)
+            neighb_row_bool, neighb_row_inds = torch.topk(in_range, new_max_neighb.item(), dim=1)
 
             # Gather new neighbor indices [n_points, new_max_neighb]
-            new_neighb_inds = neighb_inds.gather(
-                1, neighb_row_inds, sparse_grad=False)
+            new_neighb_inds = neighb_inds.gather(1, neighb_row_inds, sparse_grad=False)
 
             # Gather new distances to KP [n_points, new_max_neighb, n_kpoints]
             neighb_row_inds.unsqueeze_(2)
             neighb_row_inds = neighb_row_inds.expand(-1, -1, self.K)
-            sq_distances = sq_distances.gather(
-                1, neighb_row_inds, sparse_grad=False)
+            sq_distances = sq_distances.gather(1, neighb_row_inds, sparse_grad=False)
 
             # New shadow neighbors have to point to the last shadow point
             new_neighb_inds *= neighb_row_bool
-            new_neighb_inds -= (neighb_row_bool.type(torch.int64) -
-                                1) * int(s_pts.shape[0] - 1)
+            new_neighb_inds -= (neighb_row_bool.type(torch.int64) - 1) * int(s_pts.shape[0] - 1)
         else:
             new_neighb_inds = neighb_inds
 
@@ -392,8 +371,7 @@ class KPConv(nn.Module):
 
         elif self.KP_influence == 'linear':
             # Influence decrease linearly with the distance, and get to zero when d = KP_extent.
-            all_weights = torch.clamp(
-                1 - torch.sqrt(sq_distances) / self.KP_extent, min=0.0)
+            all_weights = torch.clamp(1 - torch.sqrt(sq_distances) / self.KP_extent, min=0.0)
             all_weights = torch.transpose(all_weights, 1, 2)
 
         elif self.KP_influence == 'gaussian':
@@ -402,18 +380,15 @@ class KPConv(nn.Module):
             all_weights = radius_gaussian(sq_distances, sigma)
             all_weights = torch.transpose(all_weights, 1, 2)
         else:
-            raise ValueError(
-                'Unknown influence function type (config.KP_influence)')
+            raise ValueError('Unknown influence function type (config.KP_influence)')
 
         # In case of closest mode, only the closest KP can influence each point
         if self.aggregation_mode == 'closest':
             neighbors_1nn = torch.argmin(sq_distances, dim=2)
-            all_weights *= torch.transpose(
-                nn.functional.one_hot(neighbors_1nn, self.K), 1, 2)
+            all_weights *= torch.transpose(nn.functional.one_hot(neighbors_1nn, self.K), 1, 2)
 
         elif self.aggregation_mode != 'sum':
-            raise ValueError(
-                "Unknown convolution mode. Should be 'closest' or 'sum'")
+            raise ValueError("Unknown convolution mode. Should be 'closest' or 'sum'")
 
         # Add a zero feature for shadow neighbors
         x = torch.cat((x, torch.zeros_like(x[:1, :])), 0)
@@ -438,8 +413,10 @@ class KPConv(nn.Module):
         ###################
         # Merge plane conv message
         ###################
-        if plane_feature is not None:
-            return torch.cat([feature, plane_feature], dim=-1)
+        if hasattr(self, "plane_conv"):
+            plane_feature = self.plane_conv(q_pts, feature)
+
+            return feature + plane_feature
         else:
             return feature
 
@@ -453,7 +430,6 @@ class KPConv(nn.Module):
 #           Complex blocks
 #       \********************/
 #
-
 
 def block_decider(block_name,
                   radius,
@@ -495,8 +471,7 @@ def block_decider(block_name,
         return NearestUpsampleBlock(layer_ind)
 
     else:
-        raise ValueError(
-            'Unknown block name in the architecture definition : ' + block_name)
+        raise ValueError('Unknown block name in the architecture definition : ' + block_name)
 
 
 class BatchNormBlock(nn.Module):
@@ -516,8 +491,7 @@ class BatchNormBlock(nn.Module):
             self.batch_norm = nn.BatchNorm1d(in_dim, momentum=bn_momentum)
             #self.batch_norm = nn.InstanceNorm1d(in_dim, momentum=bn_momentum)
         else:
-            self.bias = Parameter(torch.zeros(
-                in_dim, dtype=torch.float32), requires_grad=True)
+            self.bias = Parameter(torch.zeros(in_dim, dtype=torch.float32), requires_grad=True)
         return
 
     def reset_parameters(self):
@@ -558,8 +532,7 @@ class UnaryBlock(nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.mlp = nn.Linear(in_dim, out_dim, bias=False)
-        self.batch_norm = BatchNormBlock(
-            out_dim, self.use_bn, self.bn_momentum)
+        self.batch_norm = BatchNormBlock(out_dim, self.use_bn, self.bn_momentum)
         if not no_relu:
             self.leaky_relu = nn.LeakyReLU(0.1)
         return
@@ -574,8 +547,7 @@ class UnaryBlock(nn.Module):
     def __repr__(self):
         return 'UnaryBlock(in_feat: {:d}, out_feat: {:d}, BN: {:s}, ReLU: {:s})'.format(self.in_dim,
                                                                                         self.out_dim,
-                                                                                        str(
-                                                                                            self.use_bn),
+                                                                                        str(self.use_bn),
                                                                                         str(not self.no_relu))
 
 
@@ -616,8 +588,7 @@ class SimpleBlock(nn.Module):
                              modulated=config.modulated)
 
         # Other opperations
-        self.batch_norm = BatchNormBlock(
-            out_dim // 2, self.use_bn, self.bn_momentum)
+        self.batch_norm = BatchNormBlock(out_dim // 2, self.use_bn, self.bn_momentum)
         self.leaky_relu = nn.LeakyReLU(0.1)
 
         return
@@ -662,8 +633,7 @@ class ResnetBottleneckBlock(nn.Module):
 
         # First downscaling mlp
         if in_dim != out_dim // 4:
-            self.unary1 = UnaryBlock(
-                in_dim, out_dim // 4, self.use_bn, self.bn_momentum)
+            self.unary1 = UnaryBlock(in_dim, out_dim // 4, self.use_bn, self.bn_momentum)
         else:
             self.unary1 = nn.Identity()
 
@@ -679,17 +649,14 @@ class ResnetBottleneckBlock(nn.Module):
                              aggregation_mode=config.aggregation_mode,
                              deformable='deform' in block_name,
                              modulated=config.modulated)
-        self.batch_norm_conv = BatchNormBlock(
-            out_dim // 4, self.use_bn, self.bn_momentum)
+        self.batch_norm_conv = BatchNormBlock(out_dim // 4, self.use_bn, self.bn_momentum)
 
         # Second upscaling mlp
-        self.unary2 = UnaryBlock(
-            out_dim // 4, out_dim, self.use_bn, self.bn_momentum, no_relu=True)
+        self.unary2 = UnaryBlock(out_dim // 4, out_dim, self.use_bn, self.bn_momentum, no_relu=True)
 
         # Shortcut optional mpl
         if in_dim != out_dim:
-            self.unary_shortcut = UnaryBlock(
-                in_dim, out_dim, self.use_bn, self.bn_momentum, no_relu=True)
+            self.unary_shortcut = UnaryBlock(in_dim, out_dim, self.use_bn, self.bn_momentum, no_relu=True)
         else:
             self.unary_shortcut = nn.Identity()
 
@@ -772,3 +739,4 @@ class MaxPoolBlock(nn.Module):
 
     def forward(self, x, batch):
         return max_pool(x, batch.pools[self.layer_ind + 1])
+
